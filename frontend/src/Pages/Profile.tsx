@@ -486,7 +486,7 @@ const Profile: React.FC = () => {
             size="sm"
             variant="default"
             className="flex-1"
-            disabled={(dashboard?.profile.bio?.length || 0) >= BIO_MAX_LENGTH}
+            disabled={(dashboard?.profile.bio?.length || 0) > BIO_MAX_LENGTH}
           >
             Save
           </Button>
