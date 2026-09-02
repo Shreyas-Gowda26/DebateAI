@@ -291,6 +291,7 @@ const SavedTranscripts: React.FC<SavedTranscriptsProps> = ({ className }) => {
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     placeholder='Search topic or opponent...'
+                    aria-label='Search transcripts by topic or opponent'
                     className='pl-9'
                   />
                 </div>
