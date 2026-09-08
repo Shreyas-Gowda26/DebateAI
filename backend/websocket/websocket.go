@@ -351,7 +351,7 @@ func WebsocketHandler(c *gin.Context) {
 	client.SafeWriteJSON(participantsMsg)
 
 	// Send existing participants' detailed info to the new client
-	for connRef, existing := range room.Clients {
+	for _, existing := range snapshotRecipients(room, nil) {
 		payload := map[string]interface{}{
 			"id":          existing.UserID,
 			"username":    existing.Username,
@@ -360,18 +360,13 @@ func WebsocketHandler(c *gin.Context) {
 			"avatarUrl":   existing.AvatarURL,
 			"elo":         existing.Elo,
 		}
+
 		detailMessage := map[string]interface{}{
 			"type":        "userDetails",
 			"userDetails": payload,
 		}
 
-		if connRef == conn {
-			// Already sent this client's participant data; ensure they have their own detail payload too
-			client.SafeWriteJSON(detailMessage)
-		} else {
-			// Send existing participant info to the new client
-			client.SafeWriteJSON(detailMessage)
-		}
+		client.SafeWriteJSON(detailMessage)
 	}
 
 	// Prepare detailed payload for the new client to broadcast to others
