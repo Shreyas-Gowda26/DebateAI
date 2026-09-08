@@ -143,7 +143,26 @@ func countDebaters(room *Room) int {
 	}
 	return count
 }
+func tryAddClient(room *Room, conn *websocket.Conn, client *Client) bool {
+	room.Mutex.Lock()
+	defer room.Mutex.Unlock()
 
+	if !client.IsSpectator {
+		currentDebaters := 0
+		for _, existing := range room.Clients {
+			if !existing.IsSpectator {
+				currentDebaters++
+			}
+		}
+
+		if currentDebaters >= 2 {
+			return false
+		}
+	}
+
+	room.Clients[conn] = client
+	return true
+}
 func countSpectators(room *Room) int {
 	room.Mutex.Lock()
 	defer room.Mutex.Unlock()
@@ -283,24 +302,9 @@ func WebsocketHandler(c *gin.Context) {
 		return
 	}
 
-	// Check if this is a spectator connection (they want to receive video streams)
-	// Allow spectators to connect even if room has 2 debaters
+	// Check if this is a spectator connection.
+	// Spectators are allowed to connect even if the room has 2 debaters.
 	isSpectator := strings.EqualFold(c.Query("spectator"), "true")
-	room.Mutex.Lock()
-	currentDebaters := 0
-	for _, existing := range room.Clients {
-		if !existing.IsSpectator {
-			currentDebaters++
-		}
-	}
-	maxDebaters := 2
-	if !isSpectator && currentDebaters >= maxDebaters {
-		room.Mutex.Unlock()
-		log.Printf("[ws] rejecting debater %s for room %s: already full", email, roomID)
-		conn.Close()
-		return
-	}
-	room.Mutex.Unlock()
 
 	if avatarURL == "" {
 		avatarURL = "https://api.dicebear.com/9.x/big-ears/svg?seed=Nolan"
@@ -335,10 +339,12 @@ func WebsocketHandler(c *gin.Context) {
 	// Mark as spectator if needed (we can add a field to Client struct for this)
 	// For now, we'll handle it through the message handlers
 
-	// Send current participants to the new client
-	room.Mutex.Lock()
-	room.Clients[conn] = client
-	room.Mutex.Unlock()
+	// Atomically check the debater limit and register the client.
+	if !tryAddClient(room, conn, client) {
+		log.Printf("[ws] rejecting debater %s for room %s: already full", email, roomID)
+		conn.Close()
+		return
+	}
 
 	// Send participants list to newly connected client
 	participantsMsg := buildParticipantsMessage(room)
