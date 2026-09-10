@@ -143,6 +143,8 @@ func countDebaters(room *Room) int {
 	}
 	return count
 }
+
+// tryAddClient atomically checks the debater limit and adds the client to the room.
 func tryAddClient(room *Room, conn *websocket.Conn, client *Client) bool {
 	room.Mutex.Lock()
 	defer room.Mutex.Unlock()

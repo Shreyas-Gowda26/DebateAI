@@ -39,6 +39,8 @@ func TestBuildParticipantsMessageIncludesRecoverableRoomState(t *testing.T) {
 	}
 }
 
+// TestTryAddClientDoesNotExceedDebaterLimit verifies that concurrent debater
+// join attempts cannot exceed the room's two-debater limit.
 func TestTryAddClientDoesNotExceedDebaterLimit(t *testing.T) {
 	room := &Room{
 		Clients: make(map[*gorilla.Conn]*Client),
