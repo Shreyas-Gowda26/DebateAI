@@ -242,13 +242,23 @@ interface OTPVerificationFormProps {
 
 export const OTPVerificationForm: React.FC<OTPVerificationFormProps> = ({ email, handleOtpVerified }) => {
   const [otp, setOtp] = useState('');
+  const [resendCooldown, setResendCooldown] = useState(0);
+  const [resendMessage, setResendMessage] = useState<string | null>(null);
   const authContext = useContext(AuthContext);
 
   if (!authContext) {
     throw new Error('OTPVerificationForm must be used within an AuthProvider');
   }
 
-  const { verifyEmail, error, loading } = authContext;
+  const { verifyEmail, resendVerification, error, loading } = authContext;
+
+  useEffect(() => {
+    if (resendCooldown <= 0) return;
+    const timer = setInterval(() => {
+      setResendCooldown((prev) => Math.max(prev - 1, 0));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [resendCooldown]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -256,26 +266,49 @@ export const OTPVerificationForm: React.FC<OTPVerificationFormProps> = ({ email,
     handleOtpVerified();
   };
 
+  const handleResend = async () => {
+    setResendMessage(null);
+    try {
+      await resendVerification(email);
+      setResendMessage('A new code has been sent to your email.');
+      setResendCooldown(120);
+    } catch (err) {
+      const retryAfter = (err as Error & { retryAfterSeconds?: number }).retryAfterSeconds;
+      if (typeof retryAfter === 'number') {
+        setResendCooldown(retryAfter);
+      }
+    }
+  };
+
   return (
-    <div className="w-full flex flex-col items-center">
-      <h3 className="text-2xl font-medium my-4">Verify Your Email</h3>
-      <p className="mb-4">Enter the OTP sent to your email to complete the sign-up process.</p>
-      <form onSubmit={handleSubmit} className="w-full">
-        <Input
-          type="text"
-          value={otp}
-          onChange={(e) => setOtp(e.target.value)}
-          placeholder="Enter OTP"
-          className="w-full mb-4 dark:border-white"
-        />
-        {error && <p className="text-sm text-red-500 mb-2">{error}</p>}
-        <Button type="submit" className="w-full border dark:border-white" disabled={loading}>
-          {loading ? 'Verifying...' : 'Verify OTP'}
-        </Button>
-      </form>
-    </div>
-  );
-};
+      <div className="w-full flex flex-col items-center">
+        <h3 className="text-2xl font-medium my-4">Verify Your Email</h3>
+        <p className="mb-4">Enter the OTP sent to your email to complete the sign-up process.</p>
+        <form onSubmit={handleSubmit} className="w-full">
+          <Input
+            type="text"
+            value={otp}
+            onChange={(e) => setOtp(e.target.value)}
+            placeholder="Enter OTP"
+            className="w-full mb-4 dark:border-white"
+          />
+          {error && <p className="text-sm text-red-500 mb-2">{error}</p>}
+          {resendMessage && <p className="text-sm text-green-500 mb-2">{resendMessage}</p>}
+          <Button type="submit" className="w-full border dark:border-white" disabled={loading}>
+            {loading ? 'Verifying...' : 'Verify OTP'}
+          </Button>
+        </form>
+        <button
+          type="button"
+          onClick={handleResend}
+          disabled={resendCooldown > 0 || loading}
+          className="text-sm text-muted-foreground dark:text-white underline mt-4 disabled:no-underline disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {resendCooldown > 0 ? `Resend code in ${resendCooldown}s` : 'Resend code'}
+        </button>
+      </div>
+    );
+  };
 
 interface ForgotPasswordFormProps {
   startResetPassword: (email: string) => void;

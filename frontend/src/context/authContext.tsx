@@ -31,6 +31,7 @@ interface AuthContextType {
     newPassword: string
   ) => Promise<void>;
   googleLogin: (idToken: string) => Promise<void>;
+  resendVerification: (email: string) => Promise<void>;
 }
 
 export const AuthContext = createContext<AuthContextType | undefined>(
@@ -147,7 +148,7 @@ const verifyToken = useCallback(async () => {
       if (!response.ok) {
         const message = data.error || data.message || 'Login failed';
         const err = new Error(message) as Error & { code?: string };
-        if (message === 'Email not verified') {
+        if (data.code === 'EMAIL_NOT_VERIFIED') {
           err.code = 'EMAIL_NOT_VERIFIED';
         }
         throw err;
@@ -283,6 +284,31 @@ const verifyToken = useCallback(async () => {
     }
   };
 
+  const resendVerification = async (email: string) => {
+    setLoading(true);
+    try {
+      const response = await fetch(`${baseURL}/resendVerification`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        const message = data.error || data.message || 'Failed to resend code';
+        const err = new Error(message) as Error & { retryAfterSeconds?: number };
+        if (typeof data.retryAfterSeconds === 'number') {
+          err.retryAfterSeconds = data.retryAfterSeconds;
+        }
+        throw err;
+      }
+    } catch (error) {
+      handleError(error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const confirmForgotPassword = async (
     email: string,
     code: string,
@@ -376,6 +402,7 @@ const verifyToken = useCallback(async () => {
         logout,
         signup,
         verifyEmail,
+        resendVerification,
         forgotPassword,
         confirmForgotPassword,
         googleLogin,

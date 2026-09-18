@@ -173,23 +173,25 @@ func SignUp(ctx *gin.Context) {
 
 	now := time.Now()
 	newUser := models.User{
-		Email:            request.Email,
-		DisplayName:      defaultDisplayName,
-		Nickname:         defaultDisplayName,
-		Bio:              "",
-		Rating:           1200.0,
-		RD:               350.0,
-		Volatility:       0.06,
-		LastRatingUpdate: now,
-		AvatarURL:        "https://api.dicebear.com/9.x/big-ears/svg?seed=Jude",
-		Password:         string(hashedPassword),
-		IsVerified:       false,
-		VerificationCode: verificationCode,
-		Score:            0,
-		Badges:           []string{},
-		CurrentStreak:    0,
-		CreatedAt:        now,
-		UpdatedAt:        now,
+		Email:                  request.Email,
+		DisplayName:            defaultDisplayName,
+		Nickname:               defaultDisplayName,
+		Bio:                    "",
+		Rating:                 1200.0,
+		RD:                     350.0,
+		Volatility:             0.06,
+		LastRatingUpdate:       now,
+		AvatarURL:              "https://api.dicebear.com/9.x/big-ears/svg?seed=Jude",
+		Password:               string(hashedPassword),
+		IsVerified:             false,
+		VerificationCode:       verificationCode,
+		VerificationCodeExpiry: now.Add(24 * time.Hour),
+		VerificationCodeSentAt: now,
+		Score:                  0,
+		Badges:                 []string{},
+		CurrentStreak:          0,
+		CreatedAt:              now,
+		UpdatedAt:              now,
 	}
 
 	result, err := db.MongoDatabase.Collection("users").InsertOne(dbCtx, newUser)
@@ -239,17 +241,19 @@ func VerifyEmail(ctx *gin.Context) {
 		return
 	}
 
-	if time.Since(user.CreatedAt) > 24*time.Hour {
-		ctx.JSON(400, gin.H{"error": "Verification code expired. Please sign up again."})
+	if user.VerificationCodeExpiry.IsZero() || time.Now().After(user.VerificationCodeExpiry) {
+		ctx.JSON(400, gin.H{"error": "Verification code expired. Please request a new one."})
 		return
 	}
 
 	now := time.Now()
 	update := bson.M{
 		"$set": bson.M{
-			"isVerified":       true,
-			"verificationCode": "",
-			"updatedAt":        now,
+			"isVerified":             true,
+			"verificationCode":       "",
+			"verificationCodeExpiry": time.Time{},
+			"verificationCodeSentAt": time.Time{},
+			"updatedAt":              now,
 		},
 	}
 	_, err = db.MongoDatabase.Collection("users").UpdateOne(dbCtx, bson.M{"email": request.Email}, update)
@@ -303,7 +307,7 @@ func Login(ctx *gin.Context) {
 	}
 
 	if !user.IsVerified {
-		ctx.JSON(http.StatusUnauthorized, gin.H{"error": "Email not verified"})
+		ctx.JSON(http.StatusUnauthorized, gin.H{"error": "Email not verified", "code": "EMAIL_NOT_VERIFIED"})
 		return
 	}
 
@@ -611,4 +615,62 @@ func GetMatchmakingPoolStatus(ctx *gin.Context) {
 		"poolSize":  len(pool),
 		"timestamp": time.Now().Format(time.RFC3339),
 	})
+}
+
+func ResendVerification(ctx *gin.Context) {
+	var request structs.ResendVerificationRequest
+	if err := ctx.ShouldBindJSON(&request); err != nil {
+		ctx.JSON(400, gin.H{"error": "Invalid input", "message": err.Error()})
+		return
+	}
+	request.Email = strings.ToLower(strings.TrimSpace(request.Email))
+
+	dbCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var user models.User
+	err := db.MongoDatabase.Collection("users").FindOne(dbCtx, bson.M{"email": request.Email}).Decode(&user)
+	if err != nil {
+		ctx.JSON(400, gin.H{"error": "User not found"})
+		return
+	}
+
+	if user.IsVerified {
+		ctx.JSON(400, gin.H{"error": "Email already verified"})
+		return
+	}
+
+	const resendCooldown = 2 * time.Minute
+	if !user.VerificationCodeSentAt.IsZero() && time.Since(user.VerificationCodeSentAt) < resendCooldown {
+		wait := resendCooldown - time.Since(user.VerificationCodeSentAt)
+		ctx.JSON(429, gin.H{
+			"error":             "Please wait before requesting another code",
+			"retryAfterSeconds": int(wait.Seconds()),
+		})
+		return
+	}
+
+	newCode := utils.GenerateRandomCode(6)
+	now := time.Now()
+	update := bson.M{
+		"$set": bson.M{
+			"verificationCode":       newCode,
+			"verificationCodeExpiry": now.Add(24 * time.Hour),
+			"verificationCodeSentAt": now,
+			"updatedAt":              now,
+		},
+	}
+	_, err = db.MongoDatabase.Collection("users").UpdateOne(dbCtx, bson.M{"email": request.Email}, update)
+	if err != nil {
+		ctx.JSON(500, gin.H{"error": "Failed to resend code", "message": err.Error()})
+		return
+	}
+
+	err = utils.SendVerificationEmail(request.Email, newCode)
+	if err != nil {
+		ctx.JSON(500, gin.H{"error": "Failed to send verification email", "message": err.Error()})
+		return
+	}
+
+	ctx.JSON(200, gin.H{"message": "Verification code resent"})
 }
