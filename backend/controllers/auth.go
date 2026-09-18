@@ -660,34 +660,65 @@ func ResendVerification(ctx *gin.Context) {
 	}
 
 	const resendCooldown = 2 * time.Minute
-	if !user.VerificationCodeSentAt.IsZero() && time.Since(user.VerificationCodeSentAt) < resendCooldown {
-		wait := resendCooldown - time.Since(user.VerificationCodeSentAt)
-		ctx.JSON(429, gin.H{
-			"error":             "Please wait before requesting another code",
-			"retryAfterSeconds": int(wait.Seconds()),
-		})
-		return
-	}
-
-	newCode := utils.GenerateRandomCode(6)
 	now := time.Now()
-	update := bson.M{
-		"$set": bson.M{
-			"verificationCode":       newCode,
-			"verificationCodeExpiry": now.Add(24 * time.Hour),
-			"verificationCodeSentAt": now,
-			"updatedAt":              now,
+	cooldownThreshold := now.Add(-resendCooldown)
+
+	// Atomically claim the resend slot: the filter itself enforces the cooldown.
+	// Using FindOneAndUpdate means only one concurrent request can match and
+	// succeed — a losing concurrent request's filter no longer matches once
+	// the winner has already advanced verificationCodeSentAt.
+	claimFilter := bson.M{
+		"email": request.Email,
+		"$or": []bson.M{
+			{"verificationCodeSentAt": bson.M{"$exists": false}},
+			{"verificationCodeSentAt": time.Time{}},
+			{"verificationCodeSentAt": bson.M{"$lte": cooldownThreshold}},
 		},
 	}
-	_, err = db.MongoDatabase.Collection("users").UpdateOne(dbCtx, bson.M{"email": request.Email}, update)
-	if err != nil {
-		ctx.JSON(500, gin.H{"error": "Failed to resend code", "message": err.Error()})
+	claimUpdate := bson.M{"$set": bson.M{"verificationCodeSentAt": now, "updatedAt": now}}
+
+	claimResult := db.MongoDatabase.Collection("users").FindOneAndUpdate(dbCtx, claimFilter, claimUpdate)
+	if claimResult.Err() != nil {
+		if claimResult.Err() == mongo.ErrNoDocuments {
+			// Either lost a race to a concurrent request, or genuinely still in cooldown.
+			var current models.User
+			wait := resendCooldown
+			if ferr := db.MongoDatabase.Collection("users").FindOne(dbCtx, bson.M{"email": request.Email}).Decode(&current); ferr == nil && !current.VerificationCodeSentAt.IsZero() {
+				remaining := resendCooldown - time.Since(current.VerificationCodeSentAt)
+				if remaining > 0 {
+					wait = remaining
+				}
+			}
+			ctx.JSON(429, gin.H{
+				"error":             "Please wait before requesting another code",
+				"retryAfterSeconds": int(wait.Seconds()),
+			})
+			return
+		}
+		ctx.JSON(500, gin.H{"error": "Failed to resend code", "message": claimResult.Err().Error()})
 		return
 	}
 
+	// Slot claimed successfully — now generate and send the new code.
+	// The old code is NOT touched yet, so if sending fails, the user's
+	// existing valid code is untouched and still usable.
+	newCode := utils.GenerateRandomCode(6)
 	err = utils.SendVerificationEmail(request.Email, newCode)
 	if err != nil {
 		ctx.JSON(500, gin.H{"error": "Failed to send verification email", "message": err.Error()})
+		return
+	}
+
+	codeUpdate := bson.M{
+		"$set": bson.M{
+			"verificationCode":       newCode,
+			"verificationCodeExpiry": now.Add(24 * time.Hour),
+			"updatedAt":              time.Now(),
+		},
+	}
+	_, err = db.MongoDatabase.Collection("users").UpdateOne(dbCtx, bson.M{"email": request.Email}, codeUpdate)
+	if err != nil {
+		ctx.JSON(500, gin.H{"error": "Code sent but failed to persist, please try again", "message": err.Error()})
 		return
 	}
 
