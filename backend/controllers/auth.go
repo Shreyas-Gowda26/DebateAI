@@ -664,9 +664,8 @@ func ResendVerification(ctx *gin.Context) {
 	cooldownThreshold := now.Add(-resendCooldown)
 
 	// Atomically claim the resend slot: the filter itself enforces the cooldown.
-	// Using FindOneAndUpdate means only one concurrent request can match and
-	// succeed — a losing concurrent request's filter no longer matches once
-	// the winner has already advanced verificationCodeSentAt.
+	// FindOneAndUpdate returns the document as it was BEFORE this update, so we
+	// capture the previous verificationCodeSentAt to allow reverting on failure.
 	claimFilter := bson.M{
 		"email": request.Email,
 		"$or": []bson.M{
@@ -677,10 +676,10 @@ func ResendVerification(ctx *gin.Context) {
 	}
 	claimUpdate := bson.M{"$set": bson.M{"verificationCodeSentAt": now, "updatedAt": now}}
 
+	var prevUser models.User
 	claimResult := db.MongoDatabase.Collection("users").FindOneAndUpdate(dbCtx, claimFilter, claimUpdate)
-	if claimResult.Err() != nil {
-		if claimResult.Err() == mongo.ErrNoDocuments {
-			// Either lost a race to a concurrent request, or genuinely still in cooldown.
+	if err := claimResult.Decode(&prevUser); err != nil {
+		if err == mongo.ErrNoDocuments {
 			var current models.User
 			wait := resendCooldown
 			if ferr := db.MongoDatabase.Collection("users").FindOne(dbCtx, bson.M{"email": request.Email}).Decode(&current); ferr == nil && !current.VerificationCodeSentAt.IsZero() {
@@ -695,7 +694,7 @@ func ResendVerification(ctx *gin.Context) {
 			})
 			return
 		}
-		ctx.JSON(500, gin.H{"error": "Failed to resend code", "message": claimResult.Err().Error()})
+		ctx.JSON(500, gin.H{"error": "Failed to resend code", "message": err.Error()})
 		return
 	}
 
@@ -705,6 +704,14 @@ func ResendVerification(ctx *gin.Context) {
 	newCode := utils.GenerateRandomCode(6)
 	err = utils.SendVerificationEmail(request.Email, newCode)
 	if err != nil {
+		// Delivery failed — revert the claimed timestamp so the user isn't
+		// wrongly stuck in cooldown for a code they never received. Only
+		// revert if verificationCodeSentAt still equals the value THIS
+		// request set, so we don't clobber a legitimate newer claim.
+		revertFilter := bson.M{"email": request.Email, "verificationCodeSentAt": now}
+		revertUpdate := bson.M{"$set": bson.M{"verificationCodeSentAt": prevUser.VerificationCodeSentAt}}
+		db.MongoDatabase.Collection("users").UpdateOne(dbCtx, revertFilter, revertUpdate)
+
 		ctx.JSON(500, gin.H{"error": "Failed to send verification email", "message": err.Error()})
 		return
 	}
