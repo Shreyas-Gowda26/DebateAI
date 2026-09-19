@@ -302,6 +302,7 @@ const verifyToken = useCallback(async () => {
         }
         throw err;
       }
+      setError(null);
       return data.message || 'A new code has been sent to your email.';
     } catch (error) {
       handleError(error);

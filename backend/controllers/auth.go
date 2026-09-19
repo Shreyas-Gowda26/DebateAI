@@ -241,7 +241,14 @@ func VerifyEmail(ctx *gin.Context) {
 		return
 	}
 
-	if user.VerificationCodeExpiry.IsZero() || time.Now().After(user.VerificationCodeExpiry) {
+	expiry := user.VerificationCodeExpiry
+	if expiry.IsZero() {
+		// Legacy accounts created before this fix have no VerificationCodeExpiry
+		// persisted — fall back to the original 24h-from-signup rule so their
+		// still-valid codes aren't wrongly rejected.
+		expiry = user.CreatedAt.Add(24 * time.Hour)
+	}
+	if time.Now().After(expiry) {
 		ctx.JSON(400, gin.H{"error": "Verification code expired. Please request a new one."})
 		return
 	}
