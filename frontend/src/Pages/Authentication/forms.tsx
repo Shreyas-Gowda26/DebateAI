@@ -269,8 +269,8 @@ export const OTPVerificationForm: React.FC<OTPVerificationFormProps> = ({ email,
   const handleResend = async () => {
     setResendMessage(null);
     try {
-      await resendVerification(email);
-      setResendMessage('A new code has been sent to your email.');
+      const message = await resendVerification(email);
+      setResendMessage(message);
       setResendCooldown(120);
     } catch (err) {
       const retryAfter = (err as Error & { retryAfterSeconds?: number }).retryAfterSeconds;

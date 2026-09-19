@@ -644,18 +644,22 @@ func ResendVerification(ctx *gin.Context) {
 	}
 	request.Email = strings.ToLower(strings.TrimSpace(request.Email))
 
+	const genericMessage = "If an account exists for this email and is not yet verified, a new verification code has been sent."
+
 	dbCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	var user models.User
 	err := db.MongoDatabase.Collection("users").FindOne(dbCtx, bson.M{"email": request.Email}).Decode(&user)
 	if err != nil {
-		ctx.JSON(400, gin.H{"error": "User not found"})
+		// Don't reveal whether the account exists.
+		ctx.JSON(200, gin.H{"message": genericMessage})
 		return
 	}
 
 	if user.IsVerified {
-		ctx.JSON(400, gin.H{"error": "Email already verified"})
+		// Don't reveal that the account is already verified.
+		ctx.JSON(200, gin.H{"message": genericMessage})
 		return
 	}
 
@@ -663,9 +667,6 @@ func ResendVerification(ctx *gin.Context) {
 	now := time.Now()
 	cooldownThreshold := now.Add(-resendCooldown)
 
-	// Atomically claim the resend slot: the filter itself enforces the cooldown.
-	// FindOneAndUpdate returns the document as it was BEFORE this update, so we
-	// capture the previous verificationCodeSentAt to allow reverting on failure.
 	claimFilter := bson.M{
 		"email": request.Email,
 		"$or": []bson.M{
@@ -698,11 +699,16 @@ func ResendVerification(ctx *gin.Context) {
 		return
 	}
 
-	// Slot claimed successfully — now generate and send the new code.
-	// The old code is NOT touched yet, so if sending fails, the user's
-	// existing valid code is untouched and still usable.
+	// Slot claimed successfully — generate and send the new code.
 	newCode := utils.GenerateRandomCode(6)
 	err = utils.SendVerificationEmail(request.Email, newCode)
+
+	// SMTP delivery can be slow. dbCtx's 5s budget may already be spent by
+	// the time we get here, so use a fresh context for the DB writes below
+	// rather than risk them silently failing on an expired context.
+	postCtx, postCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer postCancel()
+
 	if err != nil {
 		// Delivery failed — revert the claimed timestamp so the user isn't
 		// wrongly stuck in cooldown for a code they never received. Only
@@ -710,12 +716,16 @@ func ResendVerification(ctx *gin.Context) {
 		// request set, so we don't clobber a legitimate newer claim.
 		revertFilter := bson.M{"email": request.Email, "verificationCodeSentAt": now}
 		revertUpdate := bson.M{"$set": bson.M{"verificationCodeSentAt": prevUser.VerificationCodeSentAt}}
-		db.MongoDatabase.Collection("users").UpdateOne(dbCtx, revertFilter, revertUpdate)
+		db.MongoDatabase.Collection("users").UpdateOne(postCtx, revertFilter, revertUpdate)
 
 		ctx.JSON(500, gin.H{"error": "Failed to send verification email", "message": err.Error()})
 		return
 	}
 
+	// Guard the write with the same claim timestamp: if this request was
+	// abnormally slow and a newer resend already superseded it, this
+	// update matches nothing instead of overwriting the newer code with
+	// this stale one.
 	codeUpdate := bson.M{
 		"$set": bson.M{
 			"verificationCode":       newCode,
@@ -723,11 +733,22 @@ func ResendVerification(ctx *gin.Context) {
 			"updatedAt":              time.Now(),
 		},
 	}
-	_, err = db.MongoDatabase.Collection("users").UpdateOne(dbCtx, bson.M{"email": request.Email}, codeUpdate)
+	result, err := db.MongoDatabase.Collection("users").UpdateOne(
+		postCtx,
+		bson.M{"email": request.Email, "verificationCodeSentAt": now},
+		codeUpdate,
+	)
 	if err != nil {
 		ctx.JSON(500, gin.H{"error": "Code sent but failed to persist, please try again", "message": err.Error()})
 		return
 	}
+	if result.MatchedCount == 0 {
+		// Superseded by a newer resend — the code we just emailed was
+		// never persisted, so silently drop it rather than stomp on the
+		// newer, currently-valid one.
+		ctx.JSON(200, gin.H{"message": genericMessage})
+		return
+	}
 
-	ctx.JSON(200, gin.H{"message": "Verification code resent"})
+	ctx.JSON(200, gin.H{"message": genericMessage})
 }

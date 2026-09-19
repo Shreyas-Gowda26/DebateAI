@@ -31,7 +31,7 @@ interface AuthContextType {
     newPassword: string
   ) => Promise<void>;
   googleLogin: (idToken: string) => Promise<void>;
-  resendVerification: (email: string) => Promise<void>;
+  resendVerification: (email: string) => Promise<string>;
 }
 
 export const AuthContext = createContext<AuthContextType | undefined>(
@@ -284,7 +284,7 @@ const verifyToken = useCallback(async () => {
     }
   };
 
-  const resendVerification = async (email: string) => {
+  const resendVerification = async (email: string): Promise<string> => {
     setLoading(true);
     try {
       const response = await fetch(`${baseURL}/resendVerification`, {
@@ -302,8 +302,10 @@ const verifyToken = useCallback(async () => {
         }
         throw err;
       }
+      return data.message || 'A new code has been sent to your email.';
     } catch (error) {
       handleError(error);
+      throw error;
     } finally {
       setLoading(false);
     }
